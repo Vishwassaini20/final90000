@@ -1,20 +1,3 @@
-# -*- coding: utf-8 -*-
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "chardet",
-#     "matplotlib",
-#     "pandas",
-#     "statsmodels",
-#     "scikit-learn",
-#     "missingno",
-#     "python-dotenv",
-#     "requests",
-#     "seaborn",
-# ]
-# ///
-
-
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
