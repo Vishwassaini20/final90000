@@ -15,20 +15,19 @@
 import os
 import sys
 import requests
-import json
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
+import chardet
 from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import DBSCAN, KMeans
 from sklearn.decomposition import PCA
 from scipy.cluster.hierarchy import linkage, dendrogram
 from dotenv import load_dotenv
+from scipy import stats
 from PIL import Image
-import chardet  # To detect file encoding
-from io import BytesIO
-import argparse
+import missingno as msno
 import logging
 
 # Setup logging
@@ -89,73 +88,60 @@ def get_ai_story(dataset_summary, dataset_info, visualizations):
 
     return response.json().get('choices', [{}])[0].get('message', {}).get('content', "No narrative generated.")
 
-# Function to load dataset with automatic encoding detection
-def load_data(file_path):
-    try:
-        with open(file_path, 'rb') as f:
-            result = chardet.detect(f.read())  # Detect the encoding of the file
-        encoding = result['encoding']
-        data = pd.read_csv(file_path, encoding=encoding)
-        logging.info(f"Data loaded with {encoding} encoding.")
-        return data
-    except Exception as e:
-        logging.error(f"Error loading file {file_path}: {e}")
-        sys.exit(1)
+# Function to detect file encoding
+def detect_encoding(filename):
+    with open(filename, 'rb') as f:
+        result = chardet.detect(f.read())
+    return result['encoding']
 
-# Perform basic analysis
-def basic_analysis(data):
-    summary = data.describe(include='all').to_dict()
-    missing_values = data.isnull().sum().to_dict()
-    column_info = data.dtypes.to_dict()
-    return {"summary": summary, "missing_values": missing_values, "column_info": column_info}
+# Function to load and clean the dataset
+def load_and_clean_data(filename):
+    encoding = detect_encoding(filename)
+    df = pd.read_csv(filename, encoding=encoding)
+    
+    # Drop rows with all NaN values
+    df.dropna(axis=0, how='all', inplace=True)
+    
+    # Fill missing values in numeric columns with the mean of the column
+    numeric_columns = df.select_dtypes(include='number')
+    df[numeric_columns.columns] = numeric_columns.fillna(numeric_columns.mean())
+    
+    # Handle missing values in non-numeric columns (e.g., fill with 'Unknown')
+    non_numeric_columns = df.select_dtypes(exclude='number')
+    df[non_numeric_columns.columns] = non_numeric_columns.fillna('Unknown')
+    
+    return df
 
-# Outlier detection using IQR
-def outlier_detection(data):
-    numeric_data = data.select_dtypes(include=np.number)
-    Q1 = numeric_data.quantile(0.25)
-    Q3 = numeric_data.quantile(0.75)
-    IQR = Q3 - Q1
-    outliers = ((numeric_data < (Q1 - 1.5 * IQR)) | (numeric_data > (Q3 + 1.5 * IQR))).sum().to_dict()
-    return {"outliers": outliers}
+# Function to summarize the dataset
+def summarize_data(df):
+    summary = {
+        'shape': df.shape,
+        'columns': df.columns.tolist(),
+        'types': df.dtypes.to_dict(),
+        'descriptive_statistics': df.describe().to_dict(),
+        'missing_values': df.isnull().sum().to_dict()
+    }
+    return summary
 
-# Enhanced plot saving with clearer visualization
-def save_plot(fig, plot_name):
-    plot_path = f"{plot_name}.png"
-    fig.savefig(plot_path, bbox_inches='tight')
-    plt.close(fig)
-    logging.info(f"Plot saved as {plot_path}")
-    return plot_path
+# Outlier detection function using Z-Score
+def detect_outliers(df):
+    numeric_df = df.select_dtypes(include=[np.number])
+    z_scores = np.abs(stats.zscore(numeric_df))
+    outliers = (z_scores > 3).sum(axis=0)
+    outlier_info = {
+        column: int(count) for column, count in zip(numeric_df.columns, outliers)
+    }
+    return outlier_info
 
-# Enhanced Correlation heatmap
-def generate_correlation_matrix(data):
-    numeric_data = data.select_dtypes(include=[np.number])
-    if numeric_data.empty:
-        logging.warning("No numeric columns for correlation matrix.")
-        return None
-    corr = numeric_data.corr()
-    fig, ax = plt.subplots(figsize=(12, 10))
-    sns.heatmap(corr, annot=True, cmap="coolwarm", fmt=".2f", ax=ax, linewidths=0.5)
-    ax.set_title("Correlation Matrix", fontsize=16)
-    return save_plot(fig, "correlation_matrix")
+# Correlation analysis function
+def correlation_analysis(df):
+    numeric_df = df.select_dtypes(include='number')
+    correlation_matrix = numeric_df.corr()
+    return correlation_matrix.to_dict()
 
-# Enhanced PCA Visualization
-def generate_pca_plot(data):
-    numeric_data = data.select_dtypes(include=np.number).dropna()
-    if numeric_data.shape[1] < 2:
-        logging.warning("Insufficient numeric columns for PCA.")
-        return None
-    pca = PCA(n_components=2)
-    pca_result = pca.fit_transform(StandardScaler().fit_transform(numeric_data))
-    fig, ax = plt.subplots(figsize=(10, 8))
-    sns.scatterplot(x=pca_result[:, 0], y=pca_result[:, 1], ax=ax, palette="viridis")
-    ax.set_title("PCA Plot", fontsize=16)
-    ax.set_xlabel("Principal Component 1", fontsize=14)
-    ax.set_ylabel("Principal Component 2", fontsize=14)
-    return save_plot(fig, "pca_plot")
-
-# Enhanced DBSCAN clustering with better color palette
-def dbscan_clustering(data):
-    numeric_data = data.select_dtypes(include=np.number).dropna()
+# Cluster analysis using DBSCAN
+def dbscan_clustering(df):
+    numeric_data = df.select_dtypes(include=np.number).dropna()
     if numeric_data.empty:
         logging.warning("No numeric data for DBSCAN.")
         return None
@@ -169,17 +155,58 @@ def dbscan_clustering(data):
     ax.set_title("DBSCAN Clustering", fontsize=16)
     return save_plot(fig, "dbscan_clusters")
 
-# Hierarchical clustering with clearer labels
-def hierarchical_clustering(data):
-    numeric_data = data.select_dtypes(include=np.number).dropna()
-    if numeric_data.empty:
-        logging.warning("No numeric data for hierarchical clustering.")
-        return None
-    linked = linkage(numeric_data, 'ward')
-    fig, ax = plt.subplots(figsize=(12, 8))
-    dendrogram(linked, ax=ax)
-    ax.set_title("Hierarchical Clustering Dendrogram", fontsize=16)
-    return save_plot(fig, "hierarchical_clustering")
+# PCA for dimensionality reduction (optional)
+def perform_pca(df):
+    scaler = StandardScaler()
+    df_scaled = scaler.fit_transform(df.select_dtypes(include=[np.number]))
+    pca = PCA(n_components=2)
+    pca_components = pca.fit_transform(df_scaled)
+    df['PCA1'] = pca_components[:, 0]
+    df['PCA2'] = pca_components[:, 1]
+    return df
+
+# Function to save visualizations
+def save_plot(fig, plot_name):
+    plot_path = f"{plot_name}.png"
+    fig.savefig(plot_path, bbox_inches='tight')
+    plt.close(fig)
+    logging.info(f"Plot saved as {plot_path}")
+    return plot_path
+
+# Create visualizations for missing data, correlation, and PCA
+def create_visualizations(df):
+    # Visualization for missing data
+    msno.matrix(df)
+    plt.tight_layout()
+    missing_img = 'missing_data.png'
+    plt.savefig(missing_img)
+    plt.close()
+
+    # Filter numeric columns for correlation heatmap
+    numeric_df = df.select_dtypes(include='number')
+    
+    if numeric_df.shape[1] > 1:
+        plt.figure(figsize=(10, 6))
+        sns.heatmap(numeric_df.corr(), annot=True, cmap='coolwarm', fmt='.2f')
+        plt.title("Correlation Matrix")
+        correlation_img = 'correlation_matrix.png'
+        plt.tight_layout()
+        plt.savefig(correlation_img)
+        plt.close()
+    else:
+        correlation_img = None
+
+    # PCA scatter plot
+    perform_pca(df)
+    pca_img = 'pca_plot.png'
+    plt.scatter(df['PCA1'], df['PCA2'])
+    plt.title('PCA Plot')
+    plt.xlabel('PCA1')
+    plt.ylabel('PCA2')
+    plt.savefig(pca_img)
+    plt.close()
+
+    return {'missing_img': missing_img, 'correlation_img': correlation_img, 'pca_img': pca_img}
 
 # Save README file with detailed structure
 def save_readme(content):
@@ -194,17 +221,12 @@ def save_readme(content):
 
 # Full analysis workflow with enhanced structure
 def analyze_and_generate_output(file_path):
-    data = load_data(file_path)
-    analysis = basic_analysis(data)
-    outliers = outlier_detection(data)
+    data = load_and_clean_data(file_path)
+    analysis = summarize_data(data)
+    outliers = detect_outliers(data)
     combined_analysis = {**analysis, **outliers}
 
-    image_paths = {
-        'correlation_matrix': generate_correlation_matrix(data),
-        'pca_plot': generate_pca_plot(data),
-        'dbscan_clusters': dbscan_clustering(data),
-        'hierarchical_clustering': hierarchical_clustering(data)
-    }
+    image_paths = create_visualizations(data)
 
     data_info = {
         "filename": file_path,
