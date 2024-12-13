@@ -1,3 +1,17 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "chardet",
+#     "matplotlib",
+#     "pandas",
+#     "statsmodels",
+#     "scikit-learn",
+#     "missingno",
+#     "python-dotenv",
+#     "requests",
+#     "seaborn",
+# ]
+# ///
 import os
 import sys
 import requests
