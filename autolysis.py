@@ -34,6 +34,7 @@ from dotenv import load_dotenv
 from io import BytesIO
 import chardet  # To detect file encoding
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -85,7 +86,7 @@ def get_ai_story(dataset_summary, dataset_info, visualizations):
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=300)  # Timeout increased to 5 minutes
         response.raise_for_status()  # Will raise HTTPError for bad responses
     except requests.exceptions.RequestException as e:
         logging.error(f"Request error: {e}")
@@ -93,7 +94,7 @@ def get_ai_story(dataset_summary, dataset_info, visualizations):
 
     return response.json().get('choices', [{}])[0].get('message', {}).get('content', "No narrative generated.")
 
-# Function to load dataset with automatic encoding detection
+# Function to load dataset with automatic encoding detection and sample for large data
 def load_data(file_path):
     try:
         with open(file_path, 'rb') as f:
@@ -101,6 +102,11 @@ def load_data(file_path):
         encoding = result['encoding']
         data = pd.read_csv(file_path, encoding=encoding)
         logging.info(f"Data loaded with {encoding} encoding.")
+        
+        # Limit to first 1000 rows for testing (for large datasets)
+        data = data.sample(n=1000, random_state=42)
+        logging.info(f"Data sampled to 1000 rows for testing.")
+        
         return data
     except Exception as e:
         logging.error(f"Error loading file {file_path}: {e}")
@@ -196,19 +202,26 @@ def save_readme(content):
         logging.error(f"Error saving README: {e}")
         sys.exit(1)
 
-# Full analysis workflow with enhanced structure
+# Full analysis workflow with enhanced structure and parallel execution
 def analyze_and_generate_output(file_path):
     data = load_data(file_path)
     analysis = basic_analysis(data)
     outliers = outlier_detection(data)
     combined_analysis = {**analysis, **outliers}
 
-    image_paths = {
-        'correlation_matrix': generate_correlation_matrix(data),
-        'pca_plot': generate_pca_plot(data),
-        'dbscan_clusters': dbscan_clustering(data),
-        'hierarchical_clustering': hierarchical_clustering(data)
-    }
+    image_paths = {}
+
+    # Using ThreadPoolExecutor for concurrent execution of plots
+    with ThreadPoolExecutor() as executor:
+        future_corr = executor.submit(generate_correlation_matrix, data)
+        future_pca = executor.submit(generate_pca_plot, data)
+        future_dbscan = executor.submit(dbscan_clustering, data)
+        future_hier = executor.submit(hierarchical_clustering, data)
+        
+        image_paths['correlation_matrix'] = future_corr.result()
+        image_paths['pca_plot'] = future_pca.result()
+        image_paths['dbscan_clusters'] = future_dbscan.result()
+        image_paths['hierarchical_clustering'] = future_hier.result()
 
     data_info = {
         "filename": file_path,
@@ -229,5 +242,5 @@ if __name__ == "__main__":
         logging.error("Usage: python autolysis.py <dataset.csv>")
         sys.exit(1)
 
-    csv_file_path = sys.argv[1]
-    analyze_and_generate_output(csv_file_path)
+    file_path = sys.argv[1]
+    analyze_and_generate_output(file_path)
