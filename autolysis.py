@@ -50,36 +50,6 @@ headers = {
     'Authorization': f'Bearer {AIPROXY_TOKEN}'
 }
 
-# Function to check if dataset is large and take a sample if needed
-def load_data_with_sample(file_path, max_rows=1000):
-    """
-    Load a sample of the dataset if it is too large.
-    
-    Parameters:
-    - file_path (str): Path to the CSV file.
-    - max_rows (int): Maximum number of rows to load from the dataset.
-    
-    Returns:
-    - DataFrame: A sample of the original dataset or the full dataset if it's small.
-    """
-    try:
-        # Check the size of the dataset
-        data = pd.read_csv(file_path, nrows=0)  # Only read headers to get row count
-        total_rows = sum(1 for _ in open(file_path)) - 1  # Subtract header row
-        logging.info(f"Dataset has {total_rows} rows.")
-        
-        # If dataset is too large, load a subset
-        if total_rows > max_rows:
-            logging.info(f"Dataset is too large. Loading a sample of {max_rows} rows.")
-            data = pd.read_csv(file_path, nrows=max_rows)
-        else:
-            data = pd.read_csv(file_path)
-        
-        return data
-    except Exception as e:
-        logging.error(f"Error loading file {file_path}: {e}")
-        sys.exit(1)
-
 # Function to request AI to generate the narrative story
 def get_ai_story(dataset_summary, dataset_info, visualizations):
     url = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
@@ -119,18 +89,37 @@ def get_ai_story(dataset_summary, dataset_info, visualizations):
 
     return response.json().get('choices', [{}])[0].get('message', {}).get('content', "No narrative generated.")
 
-# Function to load dataset with automatic encoding detection
-def load_data(file_path):
+# Function to read CSV with automatic encoding detection
+def read_csv_with_encoding(file_path):
+    """Try to read a CSV file with different encodings."""
     try:
-        with open(file_path, 'rb') as f:
-            result = chardet.detect(f.read())  # Detect the encoding of the file
+        # Attempt to read using UTF-8 encoding
+        return pd.read_csv(file_path, encoding='utf-8')
+    except UnicodeDecodeError:
+        # If UTF-8 fails, use chardet to detect the encoding
+        rawdata = open(file_path, 'rb').read()
+        result = chardet.detect(rawdata)
         encoding = result['encoding']
-        data = pd.read_csv(file_path, encoding=encoding)
-        logging.info(f"Data loaded with {encoding} encoding.")
-        return data
-    except Exception as e:
-        logging.error(f"Error loading file {file_path}: {e}")
-        sys.exit(1)
+        logging.info(f"Detected encoding: {encoding} for file {file_path}")
+        return pd.read_csv(file_path, encoding=encoding)
+
+# Function to subset large datasets
+def subset_large_dataset(data, max_size_kb=1000):
+    """
+    Subset the dataset if it exceeds the specified size (in KB).
+    By default, it will subset if the file is larger than 1000 KB (1 MB).
+    """
+    file_size = data.memory_usage(index=True).sum() / 1024  # Get file size in KB
+    logging.info(f"Dataset size: {file_size:.2f} KB")
+
+    # If dataset size exceeds the max_size_kb threshold, subset it
+    if file_size > max_size_kb:
+        logging.info(f"Dataset exceeds {max_size_kb} KB. Subsetting to a smaller sample.")
+        # Randomly select a subset of the data (e.g., 10%)
+        data = data.sample(frac=0.1, random_state=42)
+        logging.info(f"Subsetted dataset to {len(data)} rows.")
+    
+    return data
 
 # Perform basic analysis
 def basic_analysis(data):
@@ -223,33 +212,60 @@ def save_readme(content):
         sys.exit(1)
 
 # Full analysis workflow with enhanced structure
-def analyze_and_generate_output(file_path):
-    data = load_data_with_sample(file_path)  # Use the new function here
-    analysis = basic_analysis(data)
-    outliers = outlier_detection(data)
-    combined_analysis = {**analysis, **outliers}
+def analyze_and_generate_output(file_paths):
+    for file_path in file_paths:
+        try:
+            logging.info(f"Reading file: {file_path}")
+            data = read_csv_with_encoding(file_path)
+            
+            # Handle large dataset by subsetting it
+            data = subset_large_dataset(data)
+            
+            analysis = basic_analysis(data)
+            outliers = outlier_detection(data)
+            combined_analysis = {**analysis, **outliers}
 
-    image_paths = {
-        'correlation_matrix': generate_correlation_matrix(data),
-        'pca_plot': generate_pca_plot(data),
-        'dbscan_clusters': dbscan_clustering(data),
-        'hierarchical_clustering': hierarchical_clustering(data)
-    }
+            image_paths = []
+            image_paths.append(generate_correlation_matrix(data))
+            image_paths.append(generate_pca_plot(data))
+            image_paths.append(dbscan_clustering(data))
+            image_paths.append(hierarchical_clustering(data))
 
-    # Generate the narrative from AI
-    dataset_summary = json.dumps(analysis, indent=2)
-    dataset_info = json.dumps(combined_analysis, indent=2)
-    visualizations = json.dumps(image_paths, indent=2)
-    narrative = get_ai_story(dataset_summary, dataset_info, visualizations)
+            # Generate the AI-generated narrative
+            narrative = get_ai_story(str(combined_analysis), str(data.info()), image_paths)
 
-    # Save the analysis and visualizations to markdown and output
-    content = f"# Automated Data Analysis\n\n## Dataset Overview\n{dataset_summary}\n\n## Insights\n{narrative}"
-    save_readme(content)
-    logging.info(f"Analysis completed and README file generated.")
+            # Save visualizations
+            for image_path in image_paths:
+                if image_path:
+                    logging.info(f"Visualization saved: {image_path}")
+
+            # Save the README file
+            readme_content = f"""
+            # Automated Data Analysis Report
+
+            ## Dataset Summary:
+            {analysis}
+
+            ## Visualizations:
+            ![Correlation Matrix](correlation_matrix.png)
+            ![PCA Plot](pca_plot.png)
+            ![DBSCAN Clustering](dbscan_clusters.png)
+            ![Hierarchical Clustering](hierarchical_clustering.png)
+
+            ## Generated Narrative:
+            {narrative}
+            """
+            save_readme(readme_content)
+
+        except Exception as e:
+            logging.error(f"Error processing file {file_path}: {e}")
+
+def main():
+    parser = argparse.ArgumentParser(description="Automated Data Analysis Script")
+    parser.add_argument('file_paths', metavar='dataset.csv', type=str, nargs='+', help="Paths to CSV datasets for analysis")
+    args = parser.parse_args()
+    
+    analyze_and_generate_output(args.file_paths)
 
 if __name__ == "__main__":
-    file_path = sys.argv[1] if len(sys.argv) > 1 else "goodreads.csv"
-    analyze_and_generate_output(file_path)
-
-
-
+    main()
