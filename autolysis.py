@@ -26,12 +26,10 @@ from sklearn.decomposition import PCA
 from scipy.cluster.hierarchy import linkage, dendrogram
 from dotenv import load_dotenv
 from PIL import Image
-import chardet
+import chardet  # To detect file encoding
 from io import BytesIO
 import argparse
 import logging
-import time
-from concurrent.futures import ThreadPoolExecutor
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -52,9 +50,40 @@ headers = {
     'Authorization': f'Bearer {AIPROXY_TOKEN}'
 }
 
-# Function to request AI to generate the narrative story with timeout handling
+# Function to check if dataset is large and take a sample if needed
+def load_data_with_sample(file_path, max_rows=1000):
+    """
+    Load a sample of the dataset if it is too large.
+    
+    Parameters:
+    - file_path (str): Path to the CSV file.
+    - max_rows (int): Maximum number of rows to load from the dataset.
+    
+    Returns:
+    - DataFrame: A sample of the original dataset or the full dataset if it's small.
+    """
+    try:
+        # Check the size of the dataset
+        data = pd.read_csv(file_path, nrows=0)  # Only read headers to get row count
+        total_rows = sum(1 for _ in open(file_path)) - 1  # Subtract header row
+        logging.info(f"Dataset has {total_rows} rows.")
+        
+        # If dataset is too large, load a subset
+        if total_rows > max_rows:
+            logging.info(f"Dataset is too large. Loading a sample of {max_rows} rows.")
+            data = pd.read_csv(file_path, nrows=max_rows)
+        else:
+            data = pd.read_csv(file_path)
+        
+        return data
+    except Exception as e:
+        logging.error(f"Error loading file {file_path}: {e}")
+        sys.exit(1)
+
+# Function to request AI to generate the narrative story
 def get_ai_story(dataset_summary, dataset_info, visualizations):
     url = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
+
     prompt = f"""
     Below is a detailed summary and analysis of a dataset. Please generate a **rich and engaging narrative** about this dataset analysis, including:
 
@@ -73,6 +102,7 @@ def get_ai_story(dataset_summary, dataset_info, visualizations):
     **Visualizations**:
     {visualizations}
     """
+
     payload = {
         "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": prompt}],
@@ -81,11 +111,8 @@ def get_ai_story(dataset_summary, dataset_info, visualizations):
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30)  # Set a 30-second timeout
+        response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()  # Will raise HTTPError for bad responses
-    except requests.exceptions.Timeout:
-        logging.error("Request timed out. AI service is too slow.")
-        return "Error: Timeout occurred during narrative generation."
     except requests.exceptions.RequestException as e:
         logging.error(f"Request error: {e}")
         return "Error: Unable to generate narrative. Please check the AI service."
@@ -93,9 +120,13 @@ def get_ai_story(dataset_summary, dataset_info, visualizations):
     return response.json().get('choices', [{}])[0].get('message', {}).get('content', "No narrative generated.")
 
 # Function to load dataset with automatic encoding detection
-def load_data(file_path, chunk_size=50000):
+def load_data(file_path):
     try:
-        data = pd.read_csv(file_path, encoding='utf-8', chunksize=chunk_size)  # Use chunksize for large files
+        with open(file_path, 'rb') as f:
+            result = chardet.detect(f.read())  # Detect the encoding of the file
+        encoding = result['encoding']
+        data = pd.read_csv(file_path, encoding=encoding)
+        logging.info(f"Data loaded with {encoding} encoding.")
         return data
     except Exception as e:
         logging.error(f"Error loading file {file_path}: {e}")
@@ -117,21 +148,6 @@ def outlier_detection(data):
     outliers = ((numeric_data < (Q1 - 1.5 * IQR)) | (numeric_data > (Q3 + 1.5 * IQR))).sum().to_dict()
     return {"outliers": outliers}
 
-# Function to process data in chunks concurrently
-def process_chunks_in_parallel(file_path):
-    data_chunks = load_data(file_path)
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        results = list(executor.map(lambda chunk: process_data_chunk(chunk), data_chunks))
-    return results
-
-# Function to process each chunk of data
-def process_data_chunk(chunk):
-    # Perform all necessary operations for each chunk
-    analysis = basic_analysis(chunk)
-    outliers = outlier_detection(chunk)
-    combined_analysis = {**analysis, **outliers}
-    return combined_analysis
-
 # Enhanced plot saving with clearer visualization
 def save_plot(fig, plot_name):
     plot_path = f"{plot_name}.png"
@@ -152,48 +168,88 @@ def generate_correlation_matrix(data):
     ax.set_title("Correlation Matrix", fontsize=16)
     return save_plot(fig, "correlation_matrix")
 
-# Full analysis workflow with enhanced structure
-def analyze_and_generate_output(file_path):
-    start_time = time.time()
-    data_chunks = load_data(file_path)
+# Enhanced PCA Visualization
+def generate_pca_plot(data):
+    numeric_data = data.select_dtypes(include=np.number).dropna()
+    if numeric_data.shape[1] < 2:
+        logging.warning("Insufficient numeric columns for PCA.")
+        return None
+    pca = PCA(n_components=2)
+    pca_result = pca.fit_transform(StandardScaler().fit_transform(numeric_data))
+    fig, ax = plt.subplots(figsize=(10, 8))
+    sns.scatterplot(x=pca_result[:, 0], y=pca_result[:, 1], ax=ax, palette="viridis")
+    ax.set_title("PCA Plot", fontsize=16)
+    ax.set_xlabel("Principal Component 1", fontsize=14)
+    ax.set_ylabel("Principal Component 2", fontsize=14)
+    return save_plot(fig, "pca_plot")
 
-    # Process chunks concurrently
-    analysis_results = process_chunks_in_parallel(file_path)
+# Enhanced DBSCAN clustering with better color palette
+def dbscan_clustering(data):
+    numeric_data = data.select_dtypes(include=np.number).dropna()
+    if numeric_data.empty:
+        logging.warning("No numeric data for DBSCAN.")
+        return None
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(numeric_data)
+    dbscan = DBSCAN(eps=0.5, min_samples=5)
+    clusters = dbscan.fit_predict(scaled_data)
+    numeric_data['cluster'] = clusters
+    fig, ax = plt.subplots(figsize=(10, 8))
+    sns.scatterplot(x=numeric_data.iloc[:, 0], y=numeric_data.iloc[:, 1], hue=numeric_data['cluster'], palette="coolwarm", ax=ax)
+    ax.set_title("DBSCAN Clustering", fontsize=16)
+    return save_plot(fig, "dbscan_clusters")
 
-    # Generate visualizations for the entire dataset (or summary if chunked)
-    image_paths = {
-        'correlation_matrix': generate_correlation_matrix(data_chunks),
-    }
+# Hierarchical clustering with clearer labels
+def hierarchical_clustering(data):
+    numeric_data = data.select_dtypes(include=np.number).dropna()
+    if numeric_data.empty:
+        logging.warning("No numeric data for hierarchical clustering.")
+        return None
+    linked = linkage(numeric_data, 'ward')
+    fig, ax = plt.subplots(figsize=(12, 8))
+    dendrogram(linked, ax=ax)
+    ax.set_title("Hierarchical Clustering Dendrogram", fontsize=16)
+    return save_plot(fig, "hierarchical_clustering")
 
-    data_info = {
-        "filename": file_path,
-        "summary": analysis_results[0]['summary'],  # Assuming summary from first chunk for demonstration
-        "missing_values": analysis_results[0]['missing_values'],
-        "outliers": analysis_results[0]['outliers']
-    }
-
-    narrative = get_ai_story(data_info["summary"], data_info["missing_values"], image_paths)
-    if not narrative:
-        narrative = "Error: Narrative generation failed. Please verify the AI service."
-
-    # Save the results
-    save_readme(f"Dataset Analysis: {narrative}")
-    
-    end_time = time.time()
-    logging.info(f"Analysis completed in {end_time - start_time:.2f} seconds.")
-    return narrative, image_paths
-
-# Main entry point
-def main():
-    if len(sys.argv) != 2:
-        logging.error("Usage: python autolysis.py <dataset.csv>")
+# Save README file with detailed structure
+def save_readme(content):
+    try:
+        readme_path = "README.md"
+        with open(readme_path, "w") as f:
+            f.write(content)
+        logging.info(f"README saved in the current directory.")
+    except Exception as e:
+        logging.error(f"Error saving README: {e}")
         sys.exit(1)
 
-    file_path = sys.argv[1]
-    analyze_and_generate_output(file_path)
+# Full analysis workflow with enhanced structure
+def analyze_and_generate_output(file_path):
+    data = load_data_with_sample(file_path)  # Use the new function here
+    analysis = basic_analysis(data)
+    outliers = outlier_detection(data)
+    combined_analysis = {**analysis, **outliers}
+
+    image_paths = {
+        'correlation_matrix': generate_correlation_matrix(data),
+        'pca_plot': generate_pca_plot(data),
+        'dbscan_clusters': dbscan_clustering(data),
+        'hierarchical_clustering': hierarchical_clustering(data)
+    }
+
+    # Generate the narrative from AI
+    dataset_summary = json.dumps(analysis, indent=2)
+    dataset_info = json.dumps(combined_analysis, indent=2)
+    visualizations = json.dumps(image_paths, indent=2)
+    narrative = get_ai_story(dataset_summary, dataset_info, visualizations)
+
+    # Save the analysis and visualizations to markdown and output
+    content = f"# Automated Data Analysis\n\n## Dataset Overview\n{dataset_summary}\n\n## Insights\n{narrative}"
+    save_readme(content)
+    logging.info(f"Analysis completed and README file generated.")
 
 if __name__ == "__main__":
-    main()
+    file_path = sys.argv[1] if len(sys.argv) > 1 else "goodreads.csv"
+    analyze_and_generate_output(file_path)
 
 
 
