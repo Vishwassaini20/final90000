@@ -1,17 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "chardet",
-#     "matplotlib",
-#     "pandas",
-#     "statsmodels",
-#     "scikit-learn",
-#     "missingno",
-#     "python-dotenv",
-#     "requests",
-#     "seaborn",
-# ]
-# ///
 import os
 import sys
 import requests
@@ -25,10 +11,8 @@ from sklearn.cluster import DBSCAN
 from sklearn.decomposition import PCA
 from scipy.cluster.hierarchy import linkage, dendrogram
 from dotenv import load_dotenv
-from PIL import Image
-import chardet  # To detect file encoding
 from io import BytesIO
-import argparse
+import chardet  # To detect file encoding
 import logging
 
 # Setup logging
@@ -216,17 +200,15 @@ def analyze_and_generate_output(file_path):
     narrative = get_ai_story(data_info["summary"], data_info["missing_values"], image_paths)
     if not narrative:
         narrative = "Error: Narrative generation failed. Please verify the AI service."
-    save_readme(f"Dataset Analysis: {narrative}")
-    return narrative, image_paths
 
-# Main entry point
-def main():
+    save_readme(narrative)
+
+# Entry point
+if __name__ == "__main__":
     if len(sys.argv) != 2:
         logging.error("Usage: python autolysis.py <dataset.csv>")
         sys.exit(1)
 
-    file_path = sys.argv[1]
-    analyze_and_generate_output(file_path)
+    csv_file_path = sys.argv[1]
+    analyze_and_generate_output(csv_file_path)
 
-if __name__ == "__main__":
-    main()
